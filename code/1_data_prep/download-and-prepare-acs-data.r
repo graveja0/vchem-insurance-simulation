@@ -199,6 +199,10 @@ res <- acs_srvyr_design %>%
 res %>% 
     write_rds(here::here(glue::glue("_data/processed/acs-calibration-targets/acs-calibration-targets_{which_year}.rds")))
 
+res <- 
+    read_rds(here::here(glue::glue("_data/processed/acs-calibration-targets/acs-calibration-targets_{which_year}.rds")))
+
+
 res %>% 
     group_by(agep)  %>% 
     mutate(type = factor(type)) %>% 
