@@ -1,4 +1,4 @@
-if (!exists("manifest")) source(here::here("R/manifest.r"))
+if (!exists("manifest")) source(here::here("code/0_setup/manifest.r"))
 
 ins_types <- c("PRI","^INS.*X$","^MCR.*X$","^PUB.*X$","peg","poe","tri","vap","pne","png","pog","prx") %>% tolower()
 # note "vap" converted to "va" in data processing steps!
@@ -15,7 +15,7 @@ type_lut <- c("type_1" = "emp_mil",
 # Download and save raw MEPS longitudinal files
 #-------------------------------------------------
 
-if (!file.exists(here("_data/meps/h245.rds"))) {
+if (!file.exists(here("_data/raw/meps/h245.rds"))) {
     # H245
     # Release date: November 2024
     # https://meps.ahrq.gov/mepsweb/data_stats/download_data_files_detail.jsp?cboPufNumber=HC-245
@@ -46,10 +46,10 @@ if (!file.exists(here("_data/meps/h245.rds"))) {
     
     meps_post <-
         meps_sas_import( "https://meps.ahrq.gov/mepsweb/data_files/pufs/h245/h245v9.zip" )
-    meps_post %>% write_rds(here("_data/meps/h245.rds"))
-} else meps_post <- read_rds(here("_data/meps/h245.rds"))
+    meps_post %>% write_rds(here("_data/raw/meps/h245.rds"))
+} else meps_post <- read_rds(here("_data/raw/meps/h245.rds"))
 
-if (!file.exists(here("_data/meps/h164.rds"))) {    
+if (!file.exists(here("_data/raw/meps/h164.rds"))) {    
     # This file is a two-year longitudinal file derived from the respondents 
     # to the MEPS Panel 17 sample. The persons on this data set represent those 
     # who were in the MEPS population (U.S. civilian noninstitutionalized) for 
@@ -78,9 +78,9 @@ if (!file.exists(here("_data/meps/h164.rds"))) {
         }
     meps_pre <- 
         meps_sas_import_pre("https://meps.ahrq.gov/mepsweb/data_files/pufs/h164ssp.zip")
-    mepspre %>% write_rds(here("_data/meps/h164.rds"))
+    mepspre %>% write_rds(here("_data/raw/meps/h164.rds"))
     
-} else meps_pre <- read_rds(here("_data/meps/h164.rds"))
+} else meps_pre <- read_rds(here("_data/raw/meps/h164.rds"))
 
 # Source: http://asdfree.com/medical-expenditure-panel-survey-meps.html
 # ins_types <- c("GVA","GVB","GVC","HPD","HPE","HPN","HPO","HPR","HPX","IHS","^INS.*X$","^MCD.*X$","^MCR.*X$","PDK","PEG","PNE","PNG","POE","POG","PRI",

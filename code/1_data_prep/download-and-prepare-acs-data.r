@@ -1,5 +1,7 @@
 if (!exists("manifest"))
-    source(here::here("R/manifest.r"))
+    source(here::here("code/0_setup/manifest.r"))
+
+which_year = "2012"
 
 #https://asdfree.com/american-community-survey-acs.html
 
@@ -89,7 +91,6 @@ if (!file.exists("~/Desktop/acs-2022.rds")) {
     saveRDS(acs_df , file = "~/Desktop/acs-2022.rds" , compress = FALSE)
 }
 
-which_year = "2012"
 
 
 acs_df <- readRDS(glue::glue("~/Desktop/acs-{which_year}.rds")) %>% 
@@ -196,7 +197,7 @@ res <- acs_srvyr_design %>%
     summarise(pct = survey_mean())
 
 res %>% 
-    write_rds(here::here(glue::glue("_inputs/acs-calibration-targets/acs-calibration-targets_{which_year}.rds")))
+    write_rds(here::here(glue::glue("_data/processed/acs-calibration-targets/acs-calibration-targets_{which_year}.rds")))
 
 res %>% 
     group_by(agep)  %>% 
@@ -205,10 +206,10 @@ res %>%
     ggthemes::theme_calc()
 
 
-    read_rds(here::here("_inputs/acs-calibration-targets/acs-calibration-targets_2012.rds")) %>% 
+read_rds(here::here("_data/processed/acs-calibration-targets/acs-calibration-targets_2012.rds")) %>% 
     mutate(time = "pre") %>% 
     bind_rows(
-        read_rds(here::here("_inputs/acs-calibration-targets/acs-calibration-targets_2022.rds")) %>% mutate(time = "post")
+        read_rds(here::here("_data/processed/acs-calibration-targets/acs-calibration-targets_2022.rds")) %>% mutate(time = "post")
     ) %>% 
         mutate(type = factor(type)) %>% 
         ggplot(aes(x = agep, y = pct,colour = time))  + geom_point() + geom_line() + geom_errorbar(aes(ymin = pct -1.96*pct_se,ymax=pct+1.96*pct_se))+

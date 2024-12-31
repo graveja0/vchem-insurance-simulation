@@ -6,7 +6,7 @@ params_ <- list(
     v_ab_names = c("Medicare","Death"),
     n_states = 6,
     
-    horizon =  17,
+    horizon =  64,
     
     # mort_coef12 = mortality[["2012"]]$coefficients,
     # mort_coef18 = mortality[["2018"]]$coefficients,
