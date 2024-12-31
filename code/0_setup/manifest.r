@@ -21,6 +21,8 @@ library(srvyr)      # tidyverse-friendly survey analysis
 library(MASS)       # for statistical functions
 library(rms)        # for regression modeling
 library(DEoptim)    # for optimization
+library(kernlab)    # for Gaussian process regression
+library(mgcv)       # for generalized additive models
 
 # Matrix operations
 library(Matrix)     # for sparse matrices
@@ -47,3 +49,4 @@ select <- dplyr::select
 
 # Global variables
 manifest = TRUE
+

@@ -1,101 +1,140 @@
 if (!exists("p_pre"))
-    source(here::here("R/download-and-prepare-meps-data.r"))
+    source(here::here("code/1_data_prep/download-and-prepare-meps-data.r"))
 if (!exists("params"))
-    source(here::here("R/define-parameters.r"))
-source(here::here("R/functions-multistate-model.r"))
+    source(here::here("code/0_setup/define-parameters.r"))
+if (!exists("df_skinny_post"))
+    source(here::here("code/1_data_prep/prepare-meps-data-for-multistate-model.r"))
 
-knot_locations <- c(0,1,5, 10, 15, 18, 19, 20, 21, 26, 35, 50, 60)
-knot_locations <- knot_locations[between(knot_locations,params_$age0,params_$age0+params_$horizon)]
-
-####################
-# ACS-Based Targets
-####################
-
-targets <- 
-    read_rds(here::here(glue::glue("_inputs/acs-calibration-targets/acs-calibration-targets_2012.rds"))) %>% 
-    mutate(type = case_when(type==1 ~ "Employer",
-                            type==2 ~ "OthPrivate",
-                            type==3 ~ "Public", 
-                            type==4 ~ "Uninsured")) %>% 
-    filter(agep >= params$age0 & agep <= params$age0 + params$horizon)
-
-targets %>% 
-    ggplot(aes(x = agep, y = pct)) + geom_line() + facet_wrap(~type) + 
-    ggthemes::theme_economist_white()
-
-
-targets %>% 
-    ggplot(aes(x = agep, y = pct)) + 
-    geom_line() + 
-    geom_vline(xintercept = knot_locations, 
-               linetype = "dashed", 
-               color = "red", 
-               alpha = 0.5) +
-    facet_wrap(~type) + 
-    ggthemes::theme_economist_white() +
-    labs(title = "Insurance Coverage by Age",
-         subtitle = "Red dashed lines show spline knot locations",
-         x = "Age",
-         y = "Percentage")
-
-####################
-# MEPS Input Data
-####################
-
-df =
-    df_final_pre %>%
-    group_by(dupersid) %>%
-    mutate(month = (year - min(as.numeric(pre_lut))) * 12 + month(month)) %>%
-    # Exclusion: no nonelderly medicare
-    mutate(nonelderly_medicare = max(type == 5 & age < 65)) %>%
-    filter(nonelderly_medicare == 0) %>%
-    group_by(dupersid) %>%
-    # Exclusion: 3+ months observed
-    filter(n() >= 3)  %>%
-    # Exclusion: age restriciton.
-    filter(age >= params$age0 & age <= params$age0 + params$horizon) %>% 
-    mutate(type = paste0(factor(
-        type, levels = 1:4, labels = params$v_tr_names
-    ))) %>%
-    select(patient_id = dupersid,
-           weight = longwt,
-           month,
-           type,
-           age = age)
-
-set.seed(123)
-M = 1000
-sampled_ids <- sample(unique(df$patient_id), M)
-df_model <- df %>% filter(patient_id %in% sampled_ids)
-
-# Fit model
-# First fit model with more knots
-model <- fit_insurance_msm(
-    prepared_data = prepare_msm_data(
-        data = df_model,
-        knot_locations = knot_locations  # More detailed knots
-    )
-)
-
-get_qmatrix <- function(age, model, prepared_data) {
-    # Get spline basis values for this age
-    spline_vals <- predict(prepared_data$ns_basis, age)
+# Helper function to calculate empirical transition rates
+calculate_Q_init <- function(df) {
+    n_states <- length(unique(df$state))
     
-    # Create data frame with spline values and mean weight
-    pred_data <- data.frame(matrix(spline_vals, nrow=1))
-    colnames(pred_data) <- paste0("age_spline", 1:ncol(spline_vals))
-    pred_data$weight_scaled <- 0  # Use mean weight (since scaled, mean is 0)
+    # Calculate transition counts and total time in each state
+    transitions <- df %>%
+        group_by(dupersid) %>%
+        arrange(time) %>%
+        summarise(
+            from = head(state, -1),
+            to = tail(state, -1),
+            time_diff = diff(time)
+        ) %>%
+        ungroup()
     
-    # Get Q matrix from msm package
-    qmatrix <- msm::qmatrix.msm(model, covariates = pred_data)
+    # Calculate total time spent in each state
+    total_time <- df %>%
+        group_by(state) %>%
+        summarise(total_time = n()) %>%
+        pull(total_time)
     
-    return(qmatrix)
+    # Create transition matrix
+    Q <- matrix(0, n_states, n_states)
+    
+    # Calculate rates
+    for(i in 1:n_states) {
+        for(j in 1:n_states) {
+            if(i != j) {
+                n_transitions <- sum(transitions$from == i & transitions$to == j)
+                if(total_time[i] > 0) {
+                    Q[i,j] <- n_transitions / total_time[i]
+                }
+            }
+        }
+    }
+    
+    # Ensure diagonal elements make rows sum to 0
+    diag(Q) <- -rowSums(Q)
+    
+    # Add small positive value to prevent numerical issues
+    Q[Q == 0] <- 1e-6
+    diag(Q) <- -rowSums(Q)
+    
+    return(Q)
 }
 
-get_qmatrix(
-    age = 18,
-    model = model,
-    prepared_data = prepare_msm_data(data = df_model, knot_locations = knot_locations)  # More detailed knots
-)
-
+# Function to fit multistate model using msm package
+fit_multistate_model <- function(df) {
+    all_attrs <- attributes(df)
+    age_breaks <- attr(df, "age_breaks")
     
+    # Analyze transitions
+    transition_summary <- df %>%
+        group_by(age_group) %>%
+        arrange(dupersid, time) %>%
+        group_by(age_group, dupersid) %>%
+        summarise(
+            transitions = paste(state, collapse = "->"),
+            .groups = "drop"
+        ) %>%
+        count(age_group, transitions) %>%
+        arrange(age_group, desc(n))
+    
+    message("Transition patterns by age group:")
+    print(transition_summary)
+    
+    # Print sample sizes
+    sample_sizes <- df %>%
+        group_by(age_group) %>%
+        summarise(
+            n_people = n_distinct(dupersid),
+            n_obs = n(),
+            n_transitions = n() - n_distinct(dupersid)
+        )
+    
+    message("\nSample sizes by age group:")
+    print(sample_sizes)
+    
+    # Fit models
+    models <- list()
+    
+    for(ag in unique(df$age_group)) {
+        message("\nFitting model for age group: ", ag)
+        
+        df_sub <- df %>% 
+            filter(age_group == ag) %>%
+            group_by(dupersid) %>%
+            filter(n() > 1) %>%
+            ungroup()
+        
+        if(nrow(df_sub) > 0) {
+            # Calculate initial Q matrix from observed transitions
+            Q_init <- calculate_Q_init(df_sub)
+            
+            models[[as.character(ag)]] <- tryCatch({
+                msm(
+                    state ~ time,
+                    subject = dupersid,
+                    data = df_sub,
+                    qmatrix = Q_init,
+                    method = "BFGS",
+                    control = list(
+                        fnscale = 1000,
+                        maxit = 1000,
+                        reltol = 1e-4,
+                        trace = 1,
+                        REPORT = 1
+                    )
+                )
+            }, error = function(e) {
+                message("Error fitting model for age group ", ag, ": ", e$message)
+                return(NULL)
+            })
+        }
+    }
+    
+    # Store attributes
+    for (attr_name in names(all_attrs)) {
+        if (!attr_name %in% c("names", "class", "row.names")) {
+            attr(models, attr_name) <- all_attrs[[attr_name]]
+        }
+    }
+    attr(models, "sample_sizes") <- sample_sizes
+    attr(models, "transition_summary") <- transition_summary
+    
+    return(models)
+}
+
+# Fit models on pre and post datasets
+msm_fit_pre <- fit_multistate_model(df_skinny_pre)
+msm_fit_post <- fit_multistate_model(df_skinny_post)
+
+
