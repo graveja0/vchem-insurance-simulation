@@ -27,6 +27,9 @@ create_skinny_df <- function(df) {
     # More granular age breaks based on observed transitions in the plot
     age_breaks <- c(
         0,                  # Start
+        3,
+        5,
+        10,
         15,                 # Pre-transition
         18, 21,            # First major transition period
         23,                 # Post-college
