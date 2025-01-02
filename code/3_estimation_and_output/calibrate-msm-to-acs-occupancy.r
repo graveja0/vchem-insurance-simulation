@@ -20,7 +20,7 @@ acs <- read_rds(
     rename(age = agep)
 
 
-transition_rates <- 
+transition_rates <-  # created in examine-model-fit.r
     read_rds(here::here("results/model_objects/transition_rates.rds"))
 
 grouped_data <- 
@@ -142,6 +142,6 @@ model <-
     tr_pre %>% bind_rows(tr_post)
 
 acs %>% 
-    ggplot(aes(x = age, y = pct,colour = time))  + geom_point(alpha = 0.25) + geom_line(alpha = 0.25) + geom_errorbar(aes(ymin = pct -1.96*pct_se,ymax=pct+1.96*pct_se), alpha = 0.25)+
-    ggthemes::theme_calc() + facet_wrap(~type) + 
+    ggplot(aes(x = age, y = pct))  + geom_point(colour = "red")  + 
+    ggthemes::theme_calc() + facet_wrap(time~type) + 
     geom_point(data = model)

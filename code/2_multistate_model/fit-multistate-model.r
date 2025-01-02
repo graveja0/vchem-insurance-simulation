@@ -9,40 +9,39 @@ if (!exists("df_skinny_post"))
 calculate_Q_init <- function(df) {
     n_states <- length(unique(df$state))
     
-    # Calculate transition counts and total time in each state
+    # Calculate transition counts and total time in each state, incorporating weights
     transitions <- df %>%
         group_by(dupersid) %>%
         arrange(time) %>%
         summarise(
             from = head(state, -1),
             to = tail(state, -1),
-            time_diff = diff(time)
+            time_diff = diff(time),
+            weight = first(longwt) # Use the longitudinal weight
         ) %>%
         ungroup()
     
-    # Calculate total time spent in each state
+    # Calculate weighted total time spent in each state
     total_time <- df %>%
         group_by(state) %>%
-        summarise(total_time = n()) %>%
+        summarise(total_time = sum(longwt)) %>% # Weight the time
         pull(total_time)
     
     # Create transition matrix
     Q <- matrix(0, n_states, n_states)
     
-    # Calculate rates
+    # Calculate weighted rates
     for(i in 1:n_states) {
         for(j in 1:n_states) {
             if(i != j) {
-                n_transitions <- sum(transitions$from == i & transitions$to == j)
+                weighted_transitions <- sum((transitions$from == i & transitions$to == j) * transitions$weight)
                 if(total_time[i] > 0) {
-                    Q[i,j] <- n_transitions / total_time[i]
+                    Q[i,j] <- weighted_transitions / total_time[i]
                 }
             }
         }
     }
     
-    # Ensure diagonal elements make rows sum to 0
-    diag(Q) <- -rowSums(Q)
     
     # Add small positive value to prevent numerical issues
     Q[Q == 0] <- 1e-6
@@ -56,31 +55,40 @@ fit_multistate_model <- function(df) {
     all_attrs <- attributes(df)
     age_breaks <- attr(df, "age_breaks")
     
-    # Analyze transitions
+    # Analyze transitions with weights
     transition_summary <- df %>%
         group_by(age_group) %>%
         arrange(dupersid, time) %>%
         group_by(age_group, dupersid) %>%
         summarise(
             transitions = paste(state, collapse = "->"),
+            weight = first(longwt),
             .groups = "drop"
         ) %>%
-        count(age_group, transitions) %>%
-        arrange(age_group, desc(n))
+        group_by(age_group, transitions) %>%
+        summarise(
+            n = n(),
+            weighted_n = sum(weight),
+            .groups = "drop"
+        ) %>%
+        arrange(age_group, desc(weighted_n))
     
-    message("Transition patterns by age group:")
+    message("Weighted transition patterns by age group:")
     print(transition_summary)
     
-    # Print sample sizes
+    # Print weighted sample sizes
     sample_sizes <- df %>%
         group_by(age_group) %>%
         summarise(
             n_people = n_distinct(dupersid),
+            weighted_n_people = sum(longwt[!duplicated(dupersid)]),
             n_obs = n(),
-            n_transitions = n() - n_distinct(dupersid)
+            weighted_n_obs = sum(longwt),
+            n_transitions = n() - n_distinct(dupersid),
+            weighted_n_transitions = sum(longwt) - sum(longwt[!duplicated(dupersid)])
         )
     
-    message("\nSample sizes by age group:")
+    message("\nWeighted sample sizes by age group:")
     print(sample_sizes)
     
     # Fit models
@@ -96,7 +104,7 @@ fit_multistate_model <- function(df) {
             ungroup()
         
         if(nrow(df_sub) > 0) {
-            # Calculate initial Q matrix from observed transitions
+            # Calculate initial Q matrix from weighted observed transitions
             Q_init <- calculate_Q_init(df_sub)
             
             models[[as.character(ag)]] <- tryCatch({
@@ -106,6 +114,7 @@ fit_multistate_model <- function(df) {
                     data = df_sub,
                     qmatrix = Q_init,
                     method = "BFGS",
+                    #weights = longwt, # Add survey weights
                     control = list(
                         fnscale = 1000,
                         maxit = 1000,
@@ -136,5 +145,3 @@ fit_multistate_model <- function(df) {
 # Fit models on pre and post datasets
 msm_fit_pre <- fit_multistate_model(df_skinny_pre)
 msm_fit_post <- fit_multistate_model(df_skinny_post)
-
-
