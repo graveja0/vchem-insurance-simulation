@@ -1,3 +1,8 @@
+
+
+
+
+
 prepare_msm_data <- function(data, knot_locations) {
     # Ensure states are numeric for msm
     states <- sort(unique(data$type))

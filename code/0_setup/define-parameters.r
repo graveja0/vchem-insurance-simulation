@@ -1,5 +1,5 @@
 params_ <- list(
-    v_tx_names = c("2012","2018"),    # Cohorts
+    v_tx_names = c("2012","2019"),    # Cohorts
     n_tx = 2,    
     
     v_tr_names = c("Employer","OthPrivate","Public","Uninsured"),

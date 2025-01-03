@@ -158,23 +158,7 @@ mort_post <- read_rds(here::here("results/hmd-mortality/hp_fit_2019.rds"))
 # aa = 22
 # period = "pre"
 
-construct_Q <- function(aa, period = "pre") {
-    if (period=="pre") r_mort <- mort_pre(aa)
-    if (period=="post") r_mort <- mort_post(aa)
-    
-    Q_ <- rates_smoothed %>% 
-        mutate(rate = rate * 12) %>% 
-        ungroup() %>% 
-        filter(age ==aa & model == period) %>% 
-        select(from,to,rate) %>% 
-        spread(to,rate) %>% 
-        column_to_rownames(var = "from") %>% 
-        as.matrix()
-    Q <- rbind(cbind(Q_, rep(r_mort, nrow(Q_))),rep(0,ncol(Q_)+1))
-    dimnames(Q) = list(c(rownames(Q_),"Death"), c(colnames(Q_),"Death"))
-    diag(Q) = -rowSums(Q,na.rm=TRUE)
-    return(Q)
-}
+# construct_Q() -- now located in code/helper_functions/shared-functions.r
 
 
 # Run a simple annual time step discrete time Markov model and 
@@ -192,49 +176,7 @@ s0_post <-
     filter(time == "post") %>% 
     pull(pct)
 
-plot_calibration <- function(rates_smoothed) {
-    occ <- c(s0_pre,0)
-    tr_pre <- params$ages_trace %>% map_df(~({
-        Q_ <- construct_Q(.x, period = "pre")
-        occ <<- occ %*% expm(Q_)
-        data.frame(occ)
-    })) %>%
-        as_tibble() %>%
-        mutate(surviving = Employer + OthPrivate + Public + Uninsured) %>%
-        mutate(Employer = Employer / surviving,
-               OthPrivate = OthPrivate / surviving,
-               Public = Public / surviving,
-               Uninsured = Uninsured / surviving) %>%
-        select(-Death,-surviving) %>%
-        mutate(time = "pre")  %>%
-        mutate(age = params$ages_trace) %>%
-        gather(type,pct,-time, -age)
-    
-    occ <- c(s0_post,0)
-    tr_post <- params$ages_trace %>% map_df(~({
-        Q_ <- construct_Q(.x, period = "post")
-        occ <<- occ %*% expm(Q_)
-        data.frame(occ)
-    })) %>%
-        as_tibble() %>%
-        mutate(surviving = Employer + OthPrivate + Public + Uninsured) %>%
-        mutate(Employer = Employer / surviving,
-               OthPrivate = OthPrivate / surviving,
-               Public = Public / surviving,
-               Uninsured = Uninsured / surviving) %>%
-        select(-Death,-surviving) %>%
-        mutate(time = "post")  %>%
-        mutate(age = params$ages_trace) %>%
-        gather(type,pct,-time, -age)
-    
-    model <-
-        tr_pre %>% bind_rows(tr_post)
-    
-    acs %>%
-        ggplot(aes(x = age, y = pct))  + geom_point(colour = "red")  +
-        ggthemes::theme_calc() + facet_wrap(time~type) +
-        geom_point(data = model)
-}
+## plot_calibration <- function(rates_smoothed) !!! MOVED To shared-functions.r
 
 rates_smoothed %>% plot_calibration()
 
@@ -452,6 +394,7 @@ plot_calibration_with_uncertainty <- function(mcmc_results) {
 }
 
 # Run MCMC with more iterations for posterior sampling
+
 results <- calibrate_rates_mcmc(
     initial_rates = rates_smoothed,
     acs_targets = acs,
@@ -459,6 +402,52 @@ results <- calibrate_rates_mcmc(
     burnin = 5000,        # Discard first 5000 iterations
     thin = 10             # Keep every 10th iteration
 )
+
+run_model <- function(rates) {
+    rates_smoothed <- rates
+    
+    # Pre period
+    occ <- c(s0_pre, 0)
+    tr_pre <- params$ages_trace %>% map_df(~({
+        Q_ <- construct_Q(.x, period = "pre")
+        occ <<- occ %*% expm(Q_)
+        data.frame(occ)
+    })) %>% process_occupancy("pre")
+    
+    # Post period
+    occ <- c(s0_post, 0)
+    tr_post <- params$ages_trace %>% map_df(~({
+        Q_ <- construct_Q(.x, period = "post")
+        occ <<- occ %*% expm(Q_)
+        data.frame(occ)
+    })) %>% process_occupancy("post")
+    
+    bind_rows(tr_pre, tr_post)
+}
+
+rates_calibrated <- results$point_estimates
+
+rates_calibrated %>% plot_calibration()
+
+# Plot transition rates
+ggplot(rates_calibrated,
+       aes(x = age, y = rate, color = to, linetype = model)) +
+    geom_line() +
+    facet_wrap(~from, scales = "free_y") +
+    theme_minimal() +
+    labs(
+        title = "Transition Rates by Age and Initial Coverage Type",
+        x = "Age",
+        y = "Transition Rate",
+        color = "To Coverage",
+        linetype = "Period"
+    ) +
+    theme(
+        legend.position = "bottom",
+        strip.background = element_rect(fill = "lightgray"),
+        strip.text = element_text(face = "bold")
+    )
+
 
 # Plot with uncertainty bands
 plot_calibration_with_uncertainty(results)
