@@ -99,6 +99,9 @@ smooth_group_spline <- function(group_df) {
     # Get initial predictions
     predictions <- predict(gam_fit, newdata = data.frame(age = age_grid))
     
+    # Ensure predictions are positive
+    predictions <- pmax(predictions, 1e-6)  # Set minimum rate to small positive value
+    
     # For public and employer transitions, ensure sharp changes at key ages
     if(group_df$from[1] == "Public" || group_df$to[1] == "Public" ||
        group_df$from[1] == "Employer" || group_df$to[1] == "Employer") {
@@ -117,7 +120,7 @@ smooth_group_spline <- function(group_df) {
                     for(idx in idx_range) {
                         # Find nearest actual data point
                         nearest_idx <- which.min(abs(nearby_data$age - age_grid[idx]))
-                        nearest_rate <- nearby_data$rate[nearest_idx]
+                        nearest_rate <- pmax(nearby_data$rate[nearest_idx], 1e-6)  # Ensure positive
                         
                         # Weight based on distance from transition midpoint
                         weight <- dnorm(age_grid[idx] - mean(age_pair), sd = 0.5)
@@ -134,19 +137,21 @@ smooth_group_spline <- function(group_df) {
         df = group_df
     ))
 }
+
 # Update convert_to_tibble to handle the new output format
 convert_to_tibble <- function(smoothed) {
     tibble(
         age = smoothed$age_grid,
         rate = if(!is.null(smoothed$predictions)) smoothed$predictions 
-        else predict(smoothed$fit, data.frame(age = smoothed$age_grid)),
+        else pmax(predict(smoothed$fit, data.frame(age = smoothed$age_grid)), 1e-6),  # Ensure positive
         from = first(smoothed$df$from),
         to = first(smoothed$df$to),
         model = first(smoothed$df$model),
         transition_type = first(smoothed$df$transition_type)
     )
 }
-rates_smoothed <- 
+
+rates_smoothed <- rates_smoothed_orig <- 
     grouped_data %>% map_df(~({
     .x %>% smooth_group_spline() %>% convert_to_tibble()
     }))
@@ -163,7 +168,7 @@ construct_Q <- function(aa, period = "pre") {
     if (period=="post") r_mort <- mort_post(aa)
     
     Q_ <- rates_smoothed %>% 
-        mutate(rate = rate * 12) %>% 
+        mutate(rate = pmax(rate * 12, 1e-6)) %>%  # Ensure positive rates after scaling
         ungroup() %>% 
         filter(age ==aa & model == period) %>% 
         select(from,to,rate) %>% 
@@ -261,47 +266,64 @@ process_occupancy <- function(occ_df, period) {
 calibrate_rates_mcmc <- function(initial_rates, acs_targets, n_iterations = 1000, 
                                  burnin = 1000, thin = 10) {
     
-    # Function to calculate model fit (negative log likelihood)
+    # Function to calculate model fit with detailed metrics
     calculate_fit <- function(rates) {
         rates_smoothed <<- rates  # Use global assignment for construct_Q
         
         # Run model for both periods
-        occ <- c(s0_pre, 0)
-        tr_pre <- params$ages_trace %>% map_df(~({
+        occ0 <- data.frame(c(s0_pre, 0)) %>% mutate(type=c(params$v_tr_names,"Death")) %>% 
+            spread(type,1) %>% select_at(vars(c(params$v_tr_names,"Death")))
+        
+        occ <- c(s0_pre,0)
+        
+        tr_pre <- rbind.data.frame(occ0,params$ages_trace[-length(params$ages_trace)] %>% map_df(~({
             Q_ <- construct_Q(.x, period = "pre")
-            occ <<- occ %*% expm(Q_)
+            occ <<- as.numeric(occ) %*% expm(Q_)
             data.frame(occ)
-        })) %>% 
+        }))) %>% 
             process_occupancy("pre")
         
         occ <- c(s0_post, 0)
-        tr_post <- params$ages_trace %>% map_df(~({
+        occ0 <- data.frame(c(s0_post, 0)) %>% mutate(type=c(params$v_tr_names,"Death")) %>% 
+            spread(type,1) %>% select_at(vars(c(params$v_tr_names,"Death")))
+        
+        tr_post <- rbind.data.frame(occ0,params$ages_trace[-length(params$ages_trace)] %>% map_df(~({
             Q_ <- construct_Q(.x, period = "post")
-            occ <<- occ %*% expm(Q_)
+            occ <<- as.numeric(occ) %*% expm(Q_)
             data.frame(occ)
-        })) %>% 
+        }))) %>% 
             process_occupancy("post")
         
         model_pred <- bind_rows(tr_pre, tr_post)
         
-        # Modified error calculation with weights
-        total_error <- acs_targets %>%
+        # Calculate detailed error metrics by type
+        error_metrics <- acs_targets %>%
             left_join(model_pred, by = c("age", "type", "time")) %>%
+            group_by(type) %>%
+            summarise(
+                mse = mean(100*(pct.x - pct.y)^2, na.rm = TRUE),
+                mae = mean(100*abs(pct.x - pct.y), na.rm = TRUE),
+                .groups = 'drop'
+            )
+        
+        # Calculate weighted total error
+        total_error <- error_metrics %>%
             mutate(
-                # Add higher weight for OthPrivate
                 weight = case_when(
-                    type == "OthPrivate" ~ 2.0,  # Double weight for OthPrivate
+                    type == "OthPrivate" ~ 1.0,
                     TRUE ~ 1.0
-                ),
-                sq_error = (pct.x - pct.y)^2 * weight
+                )
             ) %>%
             ungroup() %>% 
-            summarise(total_error = sum(sq_error, na.rm = TRUE)) %>%
-            pull(total_error) %>%
-            as.numeric() %>%
-            `[`(1)
+            summarise(
+                total_error = sum(mse * weight)
+            ) %>%
+            pull(total_error)
         
-        return(total_error)
+        return(list(
+            total_error = total_error,
+            error_metrics = error_metrics
+        ))
     }
     
     # Initialize
@@ -313,9 +335,27 @@ calibrate_rates_mcmc <- function(initial_rates, acs_targets, n_iterations = 1000
         select(from, to, model) %>%
         distinct()
     
-    # Store full chain history (after burnin, with thinning)
+    # Initialize tracking objects
     chain_samples <- list()
     sample_counter <- 1
+    best_fit <- current_fit$total_error
+    acceptance_counts <- transition_groups %>%
+        mutate(
+            attempts = 0,
+            accepts = 0
+        )
+    
+    # Storage for trace plots
+    trace_history <- tibble(
+        iteration = integer(),
+        total_error = numeric(),
+        type = character(),
+        mse = numeric(),
+        mae = numeric()
+    )
+    
+    # Create progress bar
+    pb <- txtProgressBar(min = 0, max = n_iterations, style = 3)
     
     # MCMC iterations
     for(iter in 1:n_iterations) {
@@ -330,25 +370,65 @@ calibrate_rates_mcmc <- function(initial_rates, acs_targets, n_iterations = 1000
             proposed_rates$model == group$model
         
         scale_factor <- rnorm(1, 1, 0.1)
-        proposed_rates$rate[mask] <- proposed_rates$rate[mask] * scale_factor
+        proposed_rates$rate[mask] <- pmax(proposed_rates$rate[mask] * scale_factor, 1e-6)  # Ensure positive rates
         
         # Calculate fit
         proposed_fit <- calculate_fit(proposed_rates)
         
+        # Update acceptance counts
+        acceptance_counts <- acceptance_counts %>%
+            mutate(
+                attempts = if_else(
+                    from == group$from & to == group$to & model == group$model,
+                    attempts + 1,
+                    attempts
+                )
+            )
+        
         # Accept/reject
         accepted <- FALSE
-        if(!is.na(proposed_fit) && (proposed_fit < current_fit || 
-                                    runif(1) < exp(-(proposed_fit - current_fit)/0.01))) {
+        if(!is.na(proposed_fit$total_error) && 
+           (proposed_fit$total_error < current_fit$total_error || 
+            runif(1) < exp(-(proposed_fit$total_error - current_fit$total_error)/0.01))) {
+            
             current_rates <- proposed_rates
             current_fit <- proposed_fit
             accepted <- TRUE
+            
+            # Update acceptance counts
+            acceptance_counts <- acceptance_counts %>%
+                mutate(
+                    accepts = if_else(
+                        from == group$from & to == group$to & model == group$model,
+                        accepts + 1,
+                        accepts
+                    )
+                )
+            
+            if(current_fit$total_error < best_fit) {
+                best_fit <- current_fit$total_error
+                message("\nNew best fit: ", round(best_fit, 6),
+                        " at iteration ", iter,
+                        " for transition ", group$from, "->", group$to)
+            }
         }
+        
+        # Store trace history
+        trace_history <- bind_rows(
+            trace_history,
+            current_fit$error_metrics %>%
+                mutate(
+                    iteration = iter,
+                    total_error = current_fit$total_error
+                )
+        )
         
         # Store chain sample (after burnin and using thinning)
         if(iter > burnin && iter %% thin == 0) {
             chain_samples[[sample_counter]] <- list(
                 rates = current_rates,
-                fit = current_fit,
+                fit = current_fit$total_error,
+                error_metrics = current_fit$error_metrics,
                 iteration = iter
             )
             sample_counter <- sample_counter + 1
@@ -356,11 +436,36 @@ calibrate_rates_mcmc <- function(initial_rates, acs_targets, n_iterations = 1000
         
         # Progress updates
         if(iter %% 100 == 0) {
-            message("Completed iteration ", iter, " of ", n_iterations)
-            message("Current fit: ", round(current_fit, 6))
-            message("Samples collected: ", length(chain_samples))
+            setTxtProgressBar(pb, iter)
+            
+            # Calculate acceptance rates
+            acceptance_summary <- acceptance_counts %>%
+                mutate(
+                    rate = accepts/attempts,
+                    transition = paste(from, "->", to, "(", model, ")")
+                ) %>%
+                select(transition, rate)
+            
+            message("\nIteration ", iter, "/", n_iterations)
+            message("\nCurrent error metrics:")
+            print(current_fit$error_metrics)
+            message("\nAcceptance rates:")
+            print(acceptance_summary)
+            message("\nBest fit: ", round(best_fit, 6))
         }
     }
+    
+    close(pb)
+    
+    # Generate trace plots
+    trace_plots <- ggplot(trace_history, aes(x = iteration)) +
+        facet_wrap(~type, scales = "free_y") +
+        geom_line(aes(y = mse, color = "MSE")) +
+        geom_line(aes(y = mae, color = "MAE")) +
+        labs(title = "Error Metrics Over MCMC Iterations",
+             y = "Error",
+             color = "Metric") +
+        theme_minimal()
     
     # Convert samples to a more useful format
     posterior_samples <- bind_rows(
@@ -385,17 +490,40 @@ calibrate_rates_mcmc <- function(initial_rates, acs_targets, n_iterations = 1000
             .groups = 'drop'
         )
     
-    # Return both point estimates and full posterior
+    # Return results and diagnostics
     return(list(
         posterior_samples = posterior_samples,
         posterior_summaries = posterior_summaries,
         point_estimates = posterior_summaries %>% 
-            select(age, from, to, model, rate = rate_median)
+            select(age, from, to, model, rate = rate_median),
+        diagnostics = list(
+            trace_plots = trace_plots,
+            acceptance_rates = acceptance_counts,
+            error_history = trace_history
+        )
     ))
 }
+# Run MCMC
+results <- calibrate_rates_mcmc(
+    initial_rates = rates_smoothed,
+    acs_targets = acs,
+    n_iterations = 2000, #20000,
+    burnin = 100, #5000,
+    thin = 10
+)
 
-# Modified plotting function to show uncertainty
-plot_calibration_with_uncertainty <- function(mcmc_results) {
+# View trace plots
+print(results$diagnostics$trace_plots)
+
+# View final acceptance rates
+print(results$diagnostics$acceptance_rates %>%
+          mutate(acceptance_rate = accepts/attempts) %>%
+          arrange(desc(acceptance_rate)))
+
+# Plot calibration with uncertainty
+
+plot_calibration_with_uncertainty <- 
+    function(mcmc_results) {
     # Function to run model with specific rates
     run_model <- function(rates) {
         rates_smoothed <- rates
@@ -449,17 +577,8 @@ plot_calibration_with_uncertainty <- function(mcmc_results) {
         ggthemes::theme_calc()
 }
 
-# Run MCMC with more iterations for posterior sampling
-results <- calibrate_rates_mcmc(
-    initial_rates = rates_smoothed,
-    acs_targets = acs,
-    n_iterations = 20000,  # More iterations for better posterior sampling
-    burnin = 5000,        # Discard first 5000 iterations
-    thin = 10             # Keep every 10th iteration
-)
-
-# Plot with uncertainty bands
 plot_calibration_with_uncertainty(results)
+# Use calibrated rates for final model
+results %>% plot_calibration()
 
-# Save results
-write_rds(results, here::here("results/calibrated-rates/calibrated-rates-with-uncertainty.rds"))
+rates_calibrated %>% write_rds(here::here("results/calibrated-rates/calibrated-rates.rds"))
